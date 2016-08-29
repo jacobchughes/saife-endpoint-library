@@ -28,9 +28,9 @@ The SAIFE SDK allows you to easily build, launch, and scale your own secure appl
 
 ##Supported Platforms
 
-The SAIFE Endpoint Library is currently available in both C++ and Java, and currently supports Android™, iOS, OS X, and Linux®.
+The SAIFE Endpoint Library is currently available in both C++ and Java, and currently supports Android™, iOS, OS X (macOS), and Linux®.
 
- | Android™ | iOS | OS X | Linux®
+ | Android™ | iOS | OS X (macOS) | Linux®
 ------------ | ------------- | ------------- | ------------- | -------------
 **Minimum Platform Version** | 4.0.3 (API 14, NDK r10c) | 8.0 | 10.8 | Red Hat® Enterprise Linux® (RHEL)/CentOS 6.6
 **Language(s)** | Java | C++, Objective-C, Swift | Java, C++ | Java, C++
@@ -300,7 +300,7 @@ Generating a keypair involves:
 * setting up the distinguished name (DN) attributes to be used in the X.509 certificate;
 	* The distinguished name structure, which is independent of the SAIFE Management Dashboard, only requires a common name.  The common name is like a nickname for the certificate and is helpful for debugging purposes.  There isn’t a strict format for the common name; for example, it can be a person’s name, an ID, or a location.
 * generating entropy; and
-	* An appropriate entropy source, whether user-supplied or timing-based, is necessary to seed the deterministic random bit generator (DRBG) with a sequence of random bytes used to generate the keypair.  An acceptable level of entropy ensures that the private key is sufficiently random (and thus, difficult for a potential attacker to determine).
+	* An appropriate entropy source – typically a local system resource such as the /dev/random special file in Unix-like operating systems or the SecureRandom constructor in Java-like platforms – is necessary to seed the deterministic random bit generator (DRBG) with a sequence of random bytes used to generate the keypair.  An acceptable level of entropy ensures that the private key is sufficiently random (and thus, difficult for a potential attacker to determine).
 * augmenting the SAIFE capabilities list with application-specific capabilities.
 	* The list of application-specific capabilities allows a SAIFE-enabled endpoint (i.e., an instance of an application built with the SAIFE Endpoint Library) to communicate its feature set to other SAIFE-enabled endpoints for the sake of determining which types of information can be shared.  There isn’t a strict format for the common name; however, it is recommended that you adhere to the namespace conventions for your platform.
 
@@ -1127,13 +1127,529 @@ saife.removeVolume(vol);
 
 Your application may also allow the endpoint to delete a secure volume.
 
+##Zero-Knowledge Password Reset Tasks
+
+```c++
+//We arbitrarily set the password to 16 random (printable) characters
+static const int keystorePasswordLength = 16;
+
+//Here's where we store the keystore password.
+static const std::string passwordFileName = "saife_password";
+
+/** The SAIFE interface */
+static SaifeInterface* saife_ptr = NULL;
+
+//Inlines for class definition
+std::string generateNewKeystorePassword();
+void writePasswordToFile(std::string);
+
+class MyPwdResetListener : public saife::PasswordResetListenerInterface
+{
+public:
+    MyPwdResetListener() { }
+    virtual ~MyPwdResetListener() { }
+    virtual void PasswordResetProcessed() {
+
+        std::cout << "The SDK has received and processed a password reset message." << std::endl;
+        std::string newPwd = generateNewKeystorePassword();
+        std::cout << "Changing the keystore password to the following: " << newPwd << std::endl;
+        
+        //NOTE: The new user credential is required to be set before the keystore
+        //locks.  It should be done as soon as possible alleviate any possibility
+        //of the user not seeing the password reset prompt or catastrophic failure
+        //of the application (device crashes, user reboots phone, etc.).  It is
+        //possible to leave the keystore in a state that is not recoverable if the
+        //keystore's credentials are not entered as soon as possible.
+        saife_ptr->SetUserCredential(newPwd);
+
+        std::cout << "Writing new password to the password file." << std::endl;
+        writePasswordToFile(newPwd);
+    }
+};
+
+std::string readPasswordFromFile()
+{
+    std::ifstream pwdFile(passwordFileName);
+    if (pwdFile)
+    {
+        std::string password((std::istreambuf_iterator<char>(pwdFile)),
+                             std::istreambuf_iterator<char>());
+        pwdFile.close();
+        return password;
+    }
+    throw std::runtime_error("Password file not found");
+}
+
+//This is only for example purposes.  Under normal circumstances, you would
+//never write the keystore password to a plain text file.  We do this for
+//illustration purposes only!
+void writePasswordToFile(std::string newPassword)
+{
+    std::ofstream pwdFile(passwordFileName, std::ofstream::trunc);
+    if (pwdFile)
+    {
+        pwdFile << newPassword;
+        pwdFile.close();
+    }
+}
+
+//The following was adapted from:
+//http://stackoverflow.com/questions/440133/how-do-i-create-a-random-alpha-numeric-string-in-c
+//In a real application, the user would be prompted for the password
+std::string generateNewKeystorePassword()
+{
+    static const std::string alphanums =
+            "0123456789"
+            "abcdefghijklmnopqrstuvwxyz"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    std::random_device r;
+    std::seed_seq seed{r(), r(), r(), r(), r(), r(), r(), r()};
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<> pick(0, alphanums.size() - 1);
+
+    std::string newPwd;
+
+    for (int i = 0; i < keystorePasswordLength; i++)
+        newPwd += alphanums[pick(rng)];
+
+    return newPwd;
+}
+
+//There are multiple ways of generating entropy on devices.  This code is
+//intended for illustrative purposes only.  Use at your own risk. For more
+//information, please contact SAIFE directly to have a more detailed
+//discussion about the generation of random data as well as the platform
+//considerations that must be considered when generating random data.
+void addEntropy()
+{
+    std::random_device r;
+    std::seed_seq seed{r(), r(), r(), r(), r(), r(), r(), r()};
+    std::mt19937 rng(seed);
+
+    std::vector<uint8_t> randomData;
+    for (int i = 0; i < 4096; i++) {
+        randomData.push_back(rng());
+    }
+
+    saife_ptr->AddEntropy(randomData, 4.0);
+}
+
+void generateSigningRequest(const std::string defaultKeyStore)
+{
+    // Setup the DN attributes to be used in the X509 certificate.
+    const DistinguishedName dn("SaifeZKPR-cpp");
+
+    // In order to generate a good private key, the SAIFE SDK needs a good
+    // source of random data.  Some random sources are better than others.
+    // It is up to the developer to determine exactly how and where to obtain
+    // a source of *good* randomness.
+    addEntropy();
+
+    // Generate the public/private key pair and certificate signing request.
+    CertificateSigningRequest *certificate_signing_request = new CertificateSigningRequest();
+    std::string password = generateNewKeystorePassword();
+    writePasswordToFile(password);
+    saife_ptr->GenerateSmCsr(dn, password, certificate_signing_request);
+
+    // Add additional capabilities to the SAIFE capabilities list that convey the application specific capabilities.
+    std::vector< std::string > capabilities = certificate_signing_request->capabilities();
+    capabilities.push_back("com::saife::demo::zkpr");
+
+    // Provide CSR and capabilities (JSON string) to user for provisioning.
+    // The application must restart from the UNKEYED state.
+    std::string fName = defaultKeyStore + "/newkey.smcsr";
+    std::ofstream f(fName.c_str());
+    if (f.is_open()) {
+      f << "CSR: " << certificate_signing_request->csr() << std::endl;
+      // This should really be done with a proper JSON library.
+      f << "CAPS: [";
+      for (unsigned int i = 0; i < capabilities.size(); i++) {
+        f << "\"" << capabilities[i] << "\"";
+        if (i != capabilities.size() - 1) {
+          f << ",";
+        }
+      }
+      f << "]" << std::endl;
+    }
+    f.close();
+    delete certificate_signing_request;
+}
+
+int main(int argc, char *argv[]) {
+
+
+
+  /** The default path where all persisted SAIFE data is written. */
+  const std::string defaultKeyStore = ".SaifeStore";
+
+  //Custom password reset listener to handle password resets
+  MyPwdResetListener pwdResetListener;
+
+  try {
+    LogSinkFactory logSinkFactory;
+    LogSinkManagerInterface *logMgr = logSinkFactory.CreateConsoleSink();
+
+    // Create instance of SAIFE. A log manager may be optionally specified
+    // to redirect SAIFE logging.
+    SaifeFactory factory;
+    saife_ptr = factory.ConstructLocalSaife(logMgr);
+
+    // Set SAIFE logging level
+    saife_ptr->SetSaifeLogLevel(LogSinkInterface::SAIFE_LOG_INFO);
+
+    // Initialize the SAIFE interface
+    SaifeManagementState state = saife_ptr->Initialize(defaultKeyStore);
+
+    if (state != saife::SAIFE_UNKEYED && state != saife::SAIFE_INITIALIZED) {
+      std::cerr << "failed to initialize SAIFE" << std::endl;
+      return 1;
+    }
+
+    if (state == saife::SAIFE_UNKEYED) {
+        std::cout << "SAIFE Endpoint Library is not keyed. Generating signing request." << std::endl;
+        //The UNKEYED state is returned when SAIFE doesn't have a
+        //public/private key pair.
+        generateSigningRequest(defaultKeyStore);
+
+        //Application will then terminate to allow time to get the CSR signed
+        //by the SAIFE dashboard.  Log into https://dashboard.saifeinc.com
+        //and create a new certificate using the CSR and capabilities located
+        //in .SaifeStore/newkey.smcsr
+        std::cout << "A certificate signing request has been generated." << std::endl;
+        std::cout << "Please create a new certificate via the SAIFE Dashboard" << std::endl;
+        std::cout << "with the signing request located in: " << defaultKeyStore << std::endl;
+
+    } else if (state == saife::SAIFE_INITIALIZED) {
+        //SAIFE is now initialized
+
+        //Add our password reset handler
+        saife_ptr->AddPasswordResetListener(&pwdResetListener);
+
+        //Update the data associated with SAIFE.  This includes getting the
+        //provisioning information after the certificate is signed
+        saife_ptr->UpdateSaifeData();
+
+        //Subscribe for SAIFE Messages.  We want to respond quickly to password
+        //reset messages so we establish a persistent messaging connection to the
+        //SAIFE Messaging Server
+        saife_ptr->Subscribe();
+
+        //Now attempt to unlock the keystore with the password in the file
+        try {
+            std::string keystorePassword = readPasswordFromFile();
+            std::cout << "Attempting to unlock the keystore with password: " << keystorePassword << std::endl;
+            saife_ptr->Unlock(keystorePassword);
+            std::cout << "Keystore unlocked!" << std::endl;
+
+        } catch (saife::SaifeInvalidCredentialException sice) {
+            std::cout << "InvalidCredentialException caught!" << std::endl;
+            std::cout << "The keystore password contained within the password file was not correct." << std::endl;
+            std::cout << "You need to reset the certificate\'s password from the SAIFE Dashboard." << std::endl;
+            std::cout << "Please visit https://dashboard.saifeinc.com to perform the zero knowledge" << std::endl;
+            std::cout << "password reset (zkpr)." << std::endl;
+        }
+
+        std::cout << std::endl << "Waiting for incoming SAIFE messages..." << std::endl;
+
+        //We wait until the user breaks (CNTRL-BREAK) or kills the processes
+        while (1) {
+            saife_ptr->UpdateSaifeData();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+  } catch (InvalidManagementStateException& e) {
+    std::cerr << e.error() << std::endl;
+  } catch (SaifeInvalidCredentialException& e) {
+    std::cerr << e.error() << std::endl;
+  } catch (...) {
+    std::cerr << "Failed to initialize library with unexpected error" << std::endl;
+  }
+
+  return 0;
+}
+```
+
+```java
+public class SaifeZKPR {
+
+    // directory to save the keystore in
+    public static final String keystoreDir = ".SaifeStore";
+
+    // password file
+    public static final String SAIFE_PASSWORD_FILE = "saife_password";
+
+    public static boolean isPasswordReset = false;
+
+    // password used to unlock SAIFE
+    public static String password;
+
+    // instance of the SAIFE library
+    public static Saife saife;
+
+    // logger from SAIFE
+    public static Logger logger;
+
+    public static Random rand = new Random();
+
+    // SAIFE keeps a weak reference to these objects, we have to keep strong
+    // references
+    private static PasswordListener pwlist;
+    private static PasswordResetCallback pwcb;
+
+    public static void main(final String[] args) {
+        if (initSaife()) {
+            try {
+                // read current password from file
+                Scanner pwin = new Scanner(new FileInputStream("saife_password"));
+                password = pwin.next();
+                pwin.close();
+
+                // unlock using the read password
+                saife.unlock(password);
+
+                // update data
+                saife.updateSaifeData();
+
+                // subscribe to receive messages
+                saife.subscribe();
+
+                // try 5 times to wait for subscription state change
+                SubscriptionState state = saife.getSubscriptionState();
+                int tries = 5;
+                while (state != SubscriptionState.SUBSCRIBED_AUTHENTICATED && tries > 0) {
+                    Thread.sleep(2_000);
+                    tries--;
+                    state = saife.getSubscriptionState();
+                }
+
+                if (state != SubscriptionState.SUBSCRIBED_AUTHENTICATED) {
+                    logger.error("SAIFE did not subscribe in time");
+                    System.exit(1);
+                }
+
+                logger.info("SAIFE library is ready to be reset");
+                logger.info("Please issue a Password Reset for the certificate \"" + saife.certName() + "\" via the dashboard(https://dashboard.saifeinc.com)");
+            } catch (FileNotFoundException e) {
+                e.printStackTrace();
+                System.exit(1);
+            } catch (InvalidCredentialException e) {
+                e.printStackTrace();
+                System.exit(1);
+            } catch (InvalidManagementStateException e) {
+                e.printStackTrace();
+                System.exit(1);
+            } catch (IOException e) {
+                e.printStackTrace();
+                System.exit(1);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+                System.exit(1);
+            }
+        }
+
+        while (!isPasswordReset) {
+            try {
+                Thread.sleep(5_000);
+            } catch (InterruptedException e) {
+                // do nothing, still want to busy-wait so program ends when
+                // password is reset
+            }
+        }
+    }
+
+    /**
+     * helper method to initialize and/or generate keys for saife library
+     *
+     * @return true if and only if saife is initialized properly
+     */
+    private static boolean initSaife() {
+        try {
+            // create a logger
+            LogSinkManager logMgr = LogSinkFactory.constructConsoleSinkManager();
+
+            // construct SAIFE with logger
+            saife = SaifeFactory.constructSaife(logMgr);
+
+            // set logging level of SAIFE
+            // saife.setSaifeLogLevel(LogLevel.SAIFE_LOG_TRACE);
+            saife.setSaifeLogLevel(LogLevel.SAIFE_LOG_INFO);
+
+            logger = saife.getLogger("SaifeZKPR");
+
+            // get password from file
+            // NOTE: in real applications, the user is prompted for a password
+            Scanner pwin = new Scanner(new FileInputStream("saife_password"));
+            password = pwin.next();
+            pwin.close();
+
+            // initialize SAIFE
+            ManagementState state = saife.initialize(keystoreDir);
+
+            if (state == ManagementState.UNKEYED) {
+                // SAIFE is unkeyed, generate a CSR and manually sign
+
+                final DistinguishedName dn = new DistinguishedName("SaifeZKPR");
+
+                boolean entropic = false;
+
+                CertificationSigningRequest csr = null;
+
+                FileInputStream fin = new FileInputStream("/dev/urandom");
+
+                byte[] b;
+
+                // add the required amount of entropy to the SAIFE instance
+                while (!entropic) {
+                    try {
+                        b = new byte[32];
+                        fin.read(b);
+
+                        logger.info("Adding entropy");
+                        saife.AddEntropy(b, 4);
+
+                        csr = saife.generateSmCsr(dn, password);
+
+                        entropic = true;
+                    } catch (InsufficientEntropyException e) {
+                        logger.error(e.getMessage());
+                    }
+                }
+
+                fin.close();
+
+                final List<String> capabilities = csr.getCapabilities();
+                capabilities.add("com::saife::demo::zkpr");
+
+                final PrintWriter f = new PrintWriter(keystoreDir + "/newkey.smcsr");
+                f.println("CSR: " + csr.getEncodedCsr());
+                final Gson gson = new Gson();
+                f.println("CAPS: " + gson.toJson(capabilities));
+                f.close();
+
+                logger.info("new cert has been generated at " + keystoreDir + " /newkey.smcsr,  please provision at https://dashboard.saifeinc.com and re-run the program");
+                return false;
+            } else if (state == ManagementState.ERROR) {
+                logger.error("SAIFE failed to initialize");
+                return false;
+            } else {
+                // SAIFE is initialized, add password reset listener
+                pwlist = new PasswordListener();
+                pwcb = PasswordCallbackFactory.construct(pwlist, saife);
+                saife.addPasswordResetListener(pwcb);
+
+                return true;
+            }
+        } catch (InvalidManagementStateException imse) {
+            final String m = imse.getMessage();
+            logger.error(m);
+            return false;
+        } catch (final IOException ioe) {
+            final String m = ioe.getMessage();
+            logger.error(m);
+            return false;
+        } catch (final InvalidCredentialException ice) {
+            final String m = ice.getMessage();
+            logger.error(m);
+            return false;
+        } 
+    }
+
+    /**
+     * used to generate or prompt for a new password
+     *
+     * @param length  length of the password to generate
+     * @return  string of password
+     */
+    private static String getNewPassword() {
+        // this is where a new password is created, whether it be generated or
+        // prompted from the user. In this example, it is a randomly generated,
+        // mixed-case, alphanumeric string. This code is highly dependent on
+        // your own use-case.
+        int length = 10;
+        StringBuilder password = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            // 62
+            int c = rand.nextInt(61) + 48;
+            if (c > 57) {
+                c += 7;
+            }
+            if (c > 90) {
+                c += 6;
+            }
+            password.append((char) c);
+        }
+        logger.info("new password is \"" + password.toString() + "\"");
+        try {
+            setPasswordFile(password.toString());   // the use of a password file is for example only
+        } catch (FileNotFoundException e) {
+            logger.error("password file cannot be found");
+        }
+        return password.toString();
+    }
+
+    static class PasswordListener implements PasswordResetListener {
+
+        @Override
+        public void passwordResetProcessed() {
+            // here is where you handle the Password Reset request, getting a
+            // new password, and setting the new user credentials
+            logger.debug("Password Reset request received");
+            String newPass = getNewPassword();
+            try {
+                logger.debug("setting new password");
+                // IMPORTANT
+                // set the user credential here or the password reset request
+                // serves no purpose and nothing is changed
+                saife.setUserCredential(newPass);
+
+                logger.info("Password was successfully reset");
+                isPasswordReset = true;
+            } catch (InvalidManagementStateException e) {
+                logger.error("Password Reset failed due to InvalidManagementStateException");
+            }
+        }
+
+    }
+
+    /**
+     * set the file to contain the new password
+     * this is for examples only, and is a terrible way to store passwords
+     *
+     * @param password  the new password to set
+     */
+    private static void setPasswordFile(final String password) throws FileNotFoundException {
+        File pwfile = new File(SAIFE_PASSWORD_FILE);
+        pwfile.delete();
+        PrintStream pwout = new PrintStream(pwfile);
+        pwout.println(password);
+        pwout.close();
+    }
+}
+```
+
+Your application may utilize SAIFE’s zero-knowledge password reset (ZKPR) capability.  In the event that a user forgets their password for the application, an administrator can allow the user to unlock the endpoint, all without revealing the user’s application password.
+
+Password reset capability is enabled during the provisioning process, when the endpoint generates two ZKPR splits.  One split is stored on the endpoint, while another is encrypted – via the AES algorithm – and then sent to management services via a Continuum server.
+
+The password reset process typically involves the following steps:
+
+1. The user, attempting to unlock the SAIFE-enabled application, realizes that they do not have the correct password.
+2. The user contacts their administrator using an out-of-band channel (such as a voice call or email), requesting a password reset.
+	* Ideally, an out-of-band authentication mechanism (such as an SMS verification code) should be used in order to minimize the threat of social engineering.
+3. The administrator resets the password for the pertinent certificate, either in the SAIFE Management Dashboard or using the SAIFE Management API directly.
+4. Management services sends a secure password reset message (containing management services’ ZKPR split) to the endpoint through SAIFE’s network.
+5. The application unlocks itself and prompts the user for a new password.
+6. The user enters a new password, allowing for continued normal use of the application.
+7. The application generates two new password reset splits, sending one split – encrypted via the AES algorithm – to management services through SAIFE’s network.
+
 #Additional Resources
 
 If you need additional help with the SAIFE Endpoint Library, please check out the following resources:
 
-* the [SAIFE Developer site](http://saifeinc.com/developers/) is a hub for information about the SAIFE SDK, highlighting practical use cases and key features;
+* the [SAIFE Developer site](http://saifeinc.com/developers/) is a hub of resources for integrating the SAIFE Endpoint Library into your code;
 * our [GitHub page](https://github.com/saifeinc) showcases some sample applications; and
-* the [SAIFE Support Center](https://saife.zendesk.com/hc/en-us) allows you discuss your project, ask questions, and even receive ticket-based support.
+* the [SAIFE Support Center](https://saife.zendesk.com/hc/en-us) allows you discuss your project, ask questions, and receive ticket-based support.
 
 You can also call or email us directly:
 
