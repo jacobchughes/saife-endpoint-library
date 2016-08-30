@@ -300,7 +300,7 @@ Generating a keypair involves:
 * setting up the distinguished name (DN) attributes to be used in the X.509 certificate;
 	* The distinguished name structure, which is independent of the SAIFE Management Dashboard, only requires a common name.  The common name is like a nickname for the certificate and is helpful for debugging purposes.  There isn’t a strict format for the common name; for example, it can be a person’s name, an ID, or a location.
 * generating entropy; and
-	* An appropriate entropy source – typically a local system resource such as the /dev/random special file in Unix-like operating systems or the SecureRandom constructor in Java-like platforms – is necessary to seed the deterministic random bit generator (DRBG) with a sequence of random bytes used to generate the keypair.  An acceptable level of entropy ensures that the private key is sufficiently random (and thus, difficult for a potential attacker to determine).
+	* An appropriate entropy source is necessary to seed the deterministic random bit generator (DRBG) with a sequence of random bytes used to generate the keypair.  Typically, the entropy source is a local system resource, such as the /dev/random special file in Unix-like operating systems or the SecureRandom constructor in Java-like platforms.  It is also possible to utilize user-supplied entropy, which may entail having users draw randomly on the device screen or shake the device, among other means.  An acceptable level of entropy ensures that the private key is sufficiently random (and thus, difficult for a potential attacker to determine).
 * augmenting the SAIFE capabilities list with application-specific capabilities.
 	* The list of application-specific capabilities allows a SAIFE-enabled endpoint (i.e., an instance of an application built with the SAIFE Endpoint Library) to communicate its feature set to other SAIFE-enabled endpoints for the sake of determining which types of information can be shared.  There isn’t a strict format for the common name; however, it is recommended that you adhere to the namespace conventions for your platform.
 
@@ -1630,18 +1630,18 @@ public class SaifeZKPR {
 
 Your application may utilize SAIFE’s zero-knowledge password reset (ZKPR) capability.  In the event that a user forgets their password for the application, an administrator can allow the user to unlock the endpoint, all without revealing the user’s application password.
 
-Password reset capability is enabled during the provisioning process, when the endpoint generates two ZKPR splits.  One split is stored on the endpoint, while another is encrypted – via the AES algorithm – and then sent to management services via a Continuum server.
+Password reset capability is enabled during the provisioning process, when the endpoint generates a ZKPR key that is split into two halves. One half is stored on the endpoint, while the other half is securely sent to management services via a Continuum server.
 
 The password reset process typically involves the following steps:
 
 1. The user, attempting to unlock the SAIFE-enabled application, realizes that they do not have the correct password.
 2. The user contacts their administrator using an out-of-band channel (such as a voice call or email), requesting a password reset.
-	* Ideally, an out-of-band authentication mechanism (such as an SMS verification code) should be used in order to minimize the threat of social engineering.
+	* Ideally, an out-of-band authentication mechanism should be used in order to minimize the threat of social engineering.
 3. The administrator resets the password for the pertinent certificate, either in the SAIFE Management Dashboard or using the SAIFE Management API directly.
-4. Management services sends a secure password reset message (containing management services’ ZKPR split) to the endpoint through SAIFE’s network.
-5. The application unlocks itself and prompts the user for a new password.
-6. The user enters a new password, allowing for continued normal use of the application.
-7. The application generates two new password reset splits, sending one split – encrypted via the AES algorithm – to management services through SAIFE’s network.
+4. Management services sends a hashed, unencrypted password reset message (containing management services’ half of the ZKPR key associated with the endpoint) to the endpoint through SAIFE’s network.
+5. The application generates two new password reset splits, securely sending one split to management services through SAIFE’s network.
+6. The SAIFE Endpoint Library unlocks itself, and the application prompts the user for a new password.
+7. The user enters a new password, allowing for continued normal use of the application.
 
 #Additional Resources
 
